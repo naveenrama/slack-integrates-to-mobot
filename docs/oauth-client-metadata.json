@@ -1,6 +1,7 @@
 {
+  "client_id": "https://naveenrama.github.io/slack-integrates-to-mobot/oauth-client-metadata.json",
   "client_name": "Mobot - Slack Agent",
-  "client_uri": "https://your-domain.com",
+  "client_uri": "https://github.com/naveenrama/slack-integrates-to-mobot",
   "redirect_uris": ["http://localhost:3000/oauth/callback"],
   "grant_types": ["authorization_code"],
   "response_types": ["code"],
