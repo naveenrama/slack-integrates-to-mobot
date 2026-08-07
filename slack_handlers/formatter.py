@@ -16,7 +16,13 @@ def markdown_to_slack_mrkdwn(text: str) -> str:
     if not text:
         return text
 
-    result = text
+    # Protect code blocks from transformation
+    code_blocks = []
+    def save_code_block(match):
+        code_blocks.append(match.group(0))
+        return f"__CODE_BLOCK_{len(code_blocks) - 1}__"
+
+    result = re.sub(r"```[\s\S]*?```", save_code_block, text)
 
     # Convert markdown links [text](url) → <url|text>
     result = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", result)
@@ -27,12 +33,10 @@ def markdown_to_slack_mrkdwn(text: str) -> str:
     # Convert **bold** → *bold* (Slack uses single asterisk)
     result = re.sub(r"\*\*([^*]+)\*\*", r"*\1*", result)
 
-    # Convert standard italic *text* → _text_ (only where not already bold)
-    # This is tricky — only convert standalone single asterisks that aren't part of bold
-    # Skip this if text already uses Slack-style bold
-
     # Remove language specifiers from code blocks: ```python → ```
-    result = re.sub(r"```\w+\n", "```\n", result)
+    for i, block in enumerate(code_blocks):
+        cleaned = re.sub(r"```\w+\n", "```\n", block)
+        code_blocks[i] = cleaned
 
     # Convert HTML entities that might come from Sumo response
     result = result.replace("&amp;", "&")
@@ -41,6 +45,10 @@ def markdown_to_slack_mrkdwn(text: str) -> str:
 
     # Convert --- horizontal rules → ———
     result = re.sub(r"^-{3,}$", "———", result, flags=re.MULTILINE)
+
+    # Restore code blocks
+    for i, block in enumerate(code_blocks):
+        result = result.replace(f"__CODE_BLOCK_{i}__", block)
 
     return result
 

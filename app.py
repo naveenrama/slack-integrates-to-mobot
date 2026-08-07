@@ -1,4 +1,6 @@
 import asyncio
+import base64 as b64
+import json
 import logging
 import re
 import uuid
@@ -75,6 +77,8 @@ def oauth_start():
     slack_user_id = request.args.get("slack_user_id")
     deployment_code = request.args.get("deployment")
     custom_url = request.args.get("url")
+    channel_id = request.args.get("channel_id")
+    thread_ts = request.args.get("thread_ts")
 
     if not slack_user_id:
         return "Missing slack_user_id parameter", 400
@@ -86,7 +90,9 @@ def oauth_start():
     else:
         deployment = get_deployment(deployment_code)
 
-    authorize_url, state = oauth.build_authorize_url(deployment, slack_user_id)
+    authorize_url, state = oauth.build_authorize_url(
+        deployment, slack_user_id, channel_id=channel_id, thread_ts=thread_ts,
+    )
     return redirect(authorize_url)
 
 
@@ -116,20 +122,36 @@ def oauth_callback():
 
     token_data = asyncio.run(oauth.exchange_code(deployment, code, verifier))
 
+    # Extract API base from JWT audience claim
+    jwt_parts = token_data["access_token"].split(".")
+    jwt_payload = json.loads(b64.urlsafe_b64decode(jwt_parts[1] + "=="))
+    api_base = jwt_payload.get("aud", [deployment.api_base])[0]
+
     connection = Connection(
         id=str(uuid.uuid4()),
         label=deployment.name,
         deployment=deployment_code,
-        api_base=deployment.api_base,
+        api_base=api_base,
         access_token=token_data["access_token"],
         refresh_token=token_data.get("refresh_token", ""),
         token_expires_at=datetime.now(timezone.utc) + timedelta(seconds=token_data.get("expires_in", 300)),
-        org_id=token_data.get("org_id", ""),
+        org_id=jwt_payload.get("sumo_org_id", ""),
         scopes=token_data.get("scope", "").split(),
     )
 
     asyncio.run(store.initialize())
     asyncio.run(store.save_connection(slack_user_id, connection))
+
+    # Notify user in Slack (in the channel/thread where they initiated)
+    from slack_sdk import WebClient
+    slack_client = WebClient(token=settings.slack_bot_token)
+    notify_channel = state_data.get("channel_id") or slack_user_id
+    notify_thread = state_data.get("thread_ts")
+    slack_client.chat_postMessage(
+        channel=notify_channel,
+        thread_ts=notify_thread,
+        text=f"Connected to *{deployment.name}*! You can now ask me questions.",
+    )
 
     return """
     <html><body style="font-family:sans-serif;text-align:center;padding:50px;">

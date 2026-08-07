@@ -8,13 +8,42 @@ from slack_sdk.web.async_client import AsyncWebClient
 from config import settings
 from sumo.client import SumoClient
 from sumo.models import PollStatus
-from sumo.deployments import get_deployment
+from sumo.deployments import get_deployment, from_url
 from sumo.oauth import SumoOAuth
 from storage.base import TokenStore
 from storage.models import ConversationKey
 from slack_handlers.context import ContextEnricher
 from slack_handlers.formatter import markdown_to_slack_mrkdwn, truncate_for_slack
 from routing.router import AgentRouter
+
+
+def _build_expanded_blocks(text: str) -> list[dict]:
+    """Split text into section blocks with expand=true to avoid 'Show more'."""
+    # Slack section block text limit is 3000 chars
+    MAX_BLOCK_LEN = 2900
+    blocks = []
+
+    # Split on double newlines (paragraphs) to find natural break points
+    chunks = []
+    current = ""
+    for paragraph in text.split("\n\n"):
+        if len(current) + len(paragraph) + 2 > MAX_BLOCK_LEN:
+            if current:
+                chunks.append(current)
+            current = paragraph
+        else:
+            current = f"{current}\n\n{paragraph}" if current else paragraph
+    if current:
+        chunks.append(current)
+
+    for chunk in chunks:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": chunk},
+            "expand": True,
+        })
+
+    return blocks
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +97,21 @@ class MentionHandler:
                 )
                 return
 
-        # Set thinking status
-        await client.assistant_threads_setStatus(
-            channel_id=channel_id,
+        # Post a placeholder message with loading indicator
+        loading_img = "https://naveenrama.github.io/slack-integrates-to-mobot/loading.png"
+        thinking_msg = await client.chat_postMessage(
+            channel=channel_id,
             thread_ts=thread_ts,
-            status="Thinking...",
+            text="Processing...",
+            blocks=[{
+                "type": "context",
+                "elements": [
+                    {"type": "image", "image_url": loading_img, "alt_text": "loading"},
+                    {"type": "mrkdwn", "text": "_Processing..._"},
+                ],
+            }],
         )
+        reply_ts = thinking_msg["ts"]
 
         # Enrich context
         enricher = ContextEnricher(client)
@@ -116,6 +154,8 @@ class MentionHandler:
             client=client,
             channel_id=channel_id,
             thread_ts=thread_ts,
+            reply_ts=reply_ts,
+            user_timezone=event.get("user_tz", "UTC"),
             connection=connection,
             conversation_id=conversation_id,
             message_id=message_id,
@@ -126,15 +166,18 @@ class MentionHandler:
         client: AsyncWebClient,
         channel_id: str,
         thread_ts: str,
+        reply_ts: str,
+        user_timezone: str,
         connection,
         conversation_id: str,
         message_id: str,
     ) -> None:
         last_content = ""
-        stream_id = None
         elapsed = 0.0
 
         try:
+            last_update_time = 0.0
+
             while elapsed < settings.poll_timeout_seconds:
                 poll_response = await self.sumo_client.poll_response(
                     api_base=connection.api_base,
@@ -143,58 +186,75 @@ class MentionHandler:
                     message_id=message_id,
                 )
 
-                # Handle status updates
+                # Get status and answer from poll
                 status_text = poll_response.get_status_text()
-                if status_text and poll_response.status == PollStatus.IN_PROGRESS:
-                    await client.assistant_threads_setStatus(
-                        channel_id=channel_id,
-                        thread_ts=thread_ts,
-                        status=status_text,
-                    )
+                answer_text = poll_response.get_answer_text(user_timezone=user_timezone)
 
-                # Handle answer content
-                answer_text = poll_response.get_answer_text()
+                # Build display text with loading indicator for in-progress states
+                loading_img = "https://naveenrama.github.io/slack-integrates-to-mobot/loading.png"
                 if answer_text:
-                    formatted = markdown_to_slack_mrkdwn(answer_text)
+                    formatted = truncate_for_slack(markdown_to_slack_mrkdwn(answer_text))
+                    if status_text and poll_response.status == PollStatus.IN_PROGRESS:
+                        display = f"_{status_text}_\n\n{formatted}"
+                    else:
+                        display = formatted
+                elif status_text:
+                    display = f"_{status_text}_"
+                else:
+                    display = None
 
-                    if stream_id is None:
-                        # Start streaming
-                        stream_resp = await client.chat_startStream(
-                            channel=channel_id,
-                            thread_ts=thread_ts,
-                        )
-                        stream_id = stream_resp.get("stream_id")
-
-                    # Compute delta from formatted content
-                    delta = formatted[len(last_content):]
-                    if delta and stream_id:
-                        await client.chat_appendStream(
-                            stream_id=stream_id,
-                            channel=channel_id,
-                            chunks=[{"type": "markdown_text", "value": delta}],
-                        )
-                    last_content = formatted
+                # Update Slack every 1s if content changed
+                if display and display != last_content:
+                    now = asyncio.get_event_loop().time()
+                    if (now - last_update_time) >= 1.0:
+                        if poll_response.status == PollStatus.IN_PROGRESS:
+                            blocks = [
+                                {
+                                    "type": "context",
+                                    "elements": [
+                                        {"type": "image", "image_url": loading_img, "alt_text": "loading"},
+                                        {"type": "mrkdwn", "text": f"_{status_text or 'Processing...'}_"},
+                                    ],
+                                },
+                            ]
+                            if answer_text:
+                                formatted = markdown_to_slack_mrkdwn(answer_text)
+                                blocks.extend(_build_expanded_blocks(formatted))
+                            await client.chat_update(
+                                channel=channel_id,
+                                ts=reply_ts,
+                                text=display,
+                                blocks=blocks,
+                            )
+                        else:
+                            await client.chat_update(
+                                channel=channel_id,
+                                ts=reply_ts,
+                                text=display,
+                                blocks=_build_expanded_blocks(display),
+                            )
+                        last_content = display
+                        last_update_time = now
 
                 # Check terminal states
                 if poll_response.status == PollStatus.SUCCESS:
-                    if stream_id:
-                        await client.chat_stopStream(stream_id=stream_id, channel=channel_id)
-                    elif answer_text:
-                        final_text = truncate_for_slack(markdown_to_slack_mrkdwn(answer_text))
-                        await client.chat_postMessage(
+                    if answer_text:
+                        final_text = markdown_to_slack_mrkdwn(answer_text)
+                        # Use section blocks with expand=true to avoid "Show more"
+                        blocks = _build_expanded_blocks(final_text)
+                        await client.chat_update(
                             channel=channel_id,
-                            thread_ts=thread_ts,
-                            text=final_text,
+                            ts=reply_ts,
+                            text=final_text[:3000],
+                            blocks=blocks,
                         )
                     break
 
                 if poll_response.status == PollStatus.FAILED:
                     error_msg = poll_response.failure_reason or "Unknown error"
-                    if stream_id:
-                        await client.chat_stopStream(stream_id=stream_id, channel=channel_id)
-                    await client.chat_postMessage(
+                    await client.chat_update(
                         channel=channel_id,
-                        thread_ts=thread_ts,
+                        ts=reply_ts,
                         text=f"Sorry, something went wrong: {error_msg}",
                     )
                     break
@@ -204,33 +264,30 @@ class MentionHandler:
 
             else:
                 # Timeout
-                if stream_id:
-                    await client.chat_stopStream(stream_id=stream_id, channel=channel_id)
-                await client.chat_postMessage(
+                await client.chat_update(
                     channel=channel_id,
-                    thread_ts=thread_ts,
+                    ts=reply_ts,
                     text="Request timed out. Please try a simpler question or check Sumo Logic directly.",
                 )
 
         finally:
-            # Always clear status
-            try:
-                await client.assistant_threads_setStatus(
-                    channel_id=channel_id,
-                    thread_ts=thread_ts,
-                    status="",
-                )
-            except Exception:
-                pass
+            pass
 
     async def _refresh_token(self, user_id: str, connection) -> object | None:
         try:
-            deployment = get_deployment(connection.deployment)
+            if connection.deployment.startswith("https://"):
+                deployment = from_url(connection.deployment)
+            else:
+                deployment = get_deployment(connection.deployment)
             token_data = await self.oauth.refresh_token(deployment, connection.refresh_token)
             connection.access_token = token_data["access_token"]
             connection.refresh_token = token_data.get("refresh_token", connection.refresh_token)
-            connection.token_expires_at = datetime.now(timezone.utc) + \
-                __import__("datetime").timedelta(seconds=token_data.get("expires_in", 300))
+            connection.token_expires_at = datetime.now(timezone.utc) + timedelta(seconds=token_data.get("expires_in", 300))
+            # Update api_base from new token's audience
+            import base64 as b64, json
+            jwt_parts = connection.access_token.split(".")
+            jwt_payload = json.loads(b64.urlsafe_b64decode(jwt_parts[1] + "=="))
+            connection.api_base = jwt_payload.get("aud", [connection.api_base])[0]
             await self.store.save_connection(user_id, connection)
             return connection
         except Exception as e:

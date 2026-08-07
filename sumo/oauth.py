@@ -27,7 +27,9 @@ class SumoOAuth:
         self,
         deployment: Deployment,
         slack_user_id: str,
-        scopes: str = "runLogSearch runMetricsQuery viewLibrary",
+        scopes: str = "",
+        channel_id: str | None = None,
+        thread_ts: str | None = None,
     ) -> tuple[str, str]:
         state = secrets.token_urlsafe(32)
         verifier, challenge = self.generate_pkce()
@@ -36,17 +38,20 @@ class SumoOAuth:
             "slack_user_id": slack_user_id,
             "deployment": deployment.code,
             "verifier": verifier,
+            "channel_id": channel_id,
+            "thread_ts": thread_ts,
         }
 
         params = {
             "response_type": "code",
             "client_id": self.cimd_metadata_url,
             "redirect_uri": self.callback_url,
-            "scope": scopes,
             "state": state,
             "code_challenge": challenge,
             "code_challenge_method": "S256",
         }
+        if scopes:
+            params["scope"] = scopes
 
         authorize_url = f"{deployment.service_url}/oauth2/authorize?{urlencode(params)}"
         return authorize_url, state

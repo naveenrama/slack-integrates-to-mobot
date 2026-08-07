@@ -12,7 +12,7 @@ from sumo.deployments import DEPLOYMENTS
 logger = logging.getLogger(__name__)
 
 COMMAND_PATTERNS = {
-    "connect": re.compile(r"\bconnect(?:\s+(https?://\S+))?\s*$", re.IGNORECASE),
+    "connect": re.compile(r"\bconnect(?:\s+<?([^|>\s]+))?", re.IGNORECASE),
     "disconnect": re.compile(r"\bdisconnect\s+(\S+)", re.IGNORECASE),
     "connections": re.compile(r"\bconnections\b", re.IGNORECASE),
     "use": re.compile(r"\buse\s+(\S+)", re.IGNORECASE),
@@ -28,6 +28,14 @@ class CommandHandler:
     def register(self, app: AsyncApp) -> None:
         @app.action("connect_sumo")
         async def handle_connect_action(ack, body, client):
+            await ack()
+
+        @app.action("connect_custom_url")
+        async def handle_connect_custom_url(ack, body, client):
+            await ack()
+
+        @app.action(re.compile(r"^connect_"))
+        async def handle_connect_deployment(ack, body, client):
             await ack()
 
         @app.action("select_agent")
@@ -106,7 +114,7 @@ Or just ask me anything and I'll route to your default agent!"""
         # If user provided a URL directly: @mobot connect https://syddata.long.sumologic.net
         if url_arg and url_arg.startswith("http"):
             from urllib.parse import quote
-            connect_url = f"{oauth_base}/start?slack_user_id={user_id}&url={quote(url_arg)}"
+            connect_url = f"{oauth_base}/start?slack_user_id={user_id}&url={quote(url_arg)}&channel_id={channel_id}&thread_ts={thread_ts}"
             await client.chat_postEphemeral(
                 channel=channel_id,
                 user=user_id,
@@ -136,7 +144,7 @@ Or just ask me anything and I'll route to your default agent!"""
             deployment_buttons.append({
                 "type": "button",
                 "text": {"type": "plain_text", "text": dep.name},
-                "url": f"{oauth_base}/start?slack_user_id={user_id}&deployment={code}",
+                "url": f"{oauth_base}/start?slack_user_id={user_id}&deployment={code}&channel_id={channel_id}&thread_ts={thread_ts}",
                 "action_id": f"connect_{code}",
             })
 
