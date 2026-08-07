@@ -98,7 +98,6 @@ class MentionHandler:
                 return
 
         # Post a placeholder message with loading indicator
-        loading_img = "https://naveenrama.github.io/slack-integrates-to-mobot/loading.png"
         thinking_msg = await client.chat_postMessage(
             channel=channel_id,
             thread_ts=thread_ts,
@@ -106,8 +105,7 @@ class MentionHandler:
             blocks=[{
                 "type": "context",
                 "elements": [
-                    {"type": "image", "image_url": loading_img, "alt_text": "loading"},
-                    {"type": "mrkdwn", "text": "_Processing..._"},
+                    {"type": "mrkdwn", "text": ":hourglass_flowing_sand: _Processing..._"},
                 ],
             }],
         )
@@ -191,7 +189,7 @@ class MentionHandler:
                 answer_text = poll_response.get_answer_text(user_timezone=user_timezone)
 
                 # Build display text with loading indicator for in-progress states
-                loading_img = "https://naveenrama.github.io/slack-integrates-to-mobot/loading.png"
+                loading_emoji = ":hourglass_flowing_sand:"
                 if answer_text:
                     formatted = truncate_for_slack(markdown_to_slack_mrkdwn(answer_text))
                     if status_text and poll_response.status == PollStatus.IN_PROGRESS:
@@ -212,8 +210,7 @@ class MentionHandler:
                                 {
                                     "type": "context",
                                     "elements": [
-                                        {"type": "image", "image_url": loading_img, "alt_text": "loading"},
-                                        {"type": "mrkdwn", "text": f"_{status_text or 'Processing...'}_"},
+                                        {"type": "mrkdwn", "text": f"{loading_emoji} _{status_text or 'Processing...'}_"},
                                     ],
                                 },
                             ]
